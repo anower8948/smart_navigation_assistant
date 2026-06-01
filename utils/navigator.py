@@ -119,54 +119,58 @@ class Navigator:
             else:
                 right_obst.append(entry)
 
-        # ── Priority 1: STOP if critically close in CENTER ────────────
-        for dist, name in center_obst:
-            if dist < 0.8:
-                self._last_command = CMD_STOP
-                return CMD_STOP
+        # ── Helper: closest distance in each zone ─────────────────────
+        min_left   = min((d for d, _ in left_obst),   default=99.0)
+        min_center = min((d for d, _ in center_obst), default=99.0)
+        min_right  = min((d for d, _ in right_obst),  default=99.0)
 
-        # ── Priority 2: Danger in CENTER → choose open side ───────────
-        if center_obst:
-            min_center_dist = min(d for d, _ in center_obst)
-            if min_center_dist <= DANGER_DISTANCE:
-                # Try to route around the center obstacle
-                left_clear  = not left_obst  or min(d for d, _ in left_obst)  > DANGER_DISTANCE
-                right_clear = not right_obst or min(d for d, _ in right_obst) > DANGER_DISTANCE
+        # ── Priority 1: STOP — critically close obstacle anywhere ─────
+        if min_center < 0.8:
+            self._last_command = CMD_STOP
+            return CMD_STOP
 
-                if left_clear and right_clear:
-                    cmd = CMD_LEFT   # default: go left when both open
-                elif left_clear:
-                    cmd = CMD_LEFT
-                elif right_clear:
-                    cmd = CMD_RIGHT
-                else:
-                    cmd = CMD_STOP   # both sides blocked
-                self._last_command = cmd
-                return cmd
+        # ── Priority 2: CENTER blocked → steer to open side ──────────
+        # Triggered when closest center obstacle is within 4m
+        if center_obst and min_center <= 4.0:
+            left_clear  = min_left  > min_center
+            right_clear = min_right > min_center
 
-            # Center obstacle but still far — slow down
-            if min_center_dist <= 3.0:
-                self._last_command = CMD_SLOW
-                return CMD_SLOW
+            if left_clear and right_clear:
+                # Both sides open — go toward the side with MORE space
+                cmd = CMD_LEFT if min_left >= min_right else CMD_RIGHT
+            elif left_clear:
+                cmd = CMD_LEFT
+            elif right_clear:
+                cmd = CMD_RIGHT
+            else:
+                # Both sides also blocked — stop
+                cmd = CMD_STOP
+            self._last_command = cmd
+            return cmd
 
-        # ── Priority 3: Obstacle only on left → go right ──────────────
-        if left_obst and not center_obst and not right_obst:
+        # ── Priority 3: Obstacle on LEFT side only → Move Right ───────
+        if left_obst and min_left <= 4.0 and not center_obst:
             self._last_command = CMD_RIGHT
             return CMD_RIGHT
 
-        # ── Priority 4: Obstacle only on right → go left ──────────────
-        if right_obst and not center_obst and not left_obst:
+        # ── Priority 4: Obstacle on RIGHT side only → Move Left ───────
+        if right_obst and min_right <= 4.0 and not center_obst:
             self._last_command = CMD_LEFT
             return CMD_LEFT
 
-        # ── Priority 5: Obstacles on sides but not center ─────────────
+        # ── Priority 5: Obstacles on both sides, center clear ─────────
         if (left_obst or right_obst) and not center_obst:
-            self._last_command = CMD_FORWARD
-            return CMD_FORWARD
+            # Steer toward the side with more space
+            if min_left < min_right:
+                self._last_command = CMD_RIGHT
+                return CMD_RIGHT
+            else:
+                self._last_command = CMD_LEFT
+                return CMD_LEFT
 
-        # ── Default: clear path ────────────────────────────────────────
-        self._last_command = CMD_CLEAR
-        return CMD_CLEAR
+        # ── Default: path clear ────────────────────────────────────────
+        self._last_command = CMD_FORWARD
+        return CMD_FORWARD
 
     # ──────────────────────────────────────────
     # HUD overlay
