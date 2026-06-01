@@ -140,33 +140,81 @@ class AlertEngine:
 
         return alerts
 
-    # ── Draw alerts on frame ─────────────────────────────────────────
+    # ── Draw alerts on frame ────────────────────────────────────────────────
     def draw_alerts(self, frame: np.ndarray,
                     alerts: list[str]) -> np.ndarray:
         """
-        Draw active alert banners at the top of the frame.
+        Draw clean alert pill badges stacked below the top status bar.
+
+        Design (ASCII-only, no Unicode symbols):
+          [ALERT]  Person #4 approaching fast!
+          [ALERT]  Crowded area - 4 people
         """
         if not alerts:
             return frame
 
-        y_start = 55
-        line_h  = 26
+        font       = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.46
+        font_thick = 1
+        tag_scale  = 0.38
+        pad_x      = 7
+        pad_y      = 5
+        y_cursor   = 42    # below the top status bar
+        gap        = 5     # gap between badges
 
-        for i, alert in enumerate(alerts[:4]):   # max 4 alerts shown
-            y = y_start + i * line_h
+        def _color(msg):
+            m = msg.lower()
+            if "approaching fast" in m or "stop sign" in m:
+                return (0, 40, 210)    # red   (BGR)
+            if "crowded" in m or "traffic" in m:
+                return (0, 130, 220)   # orange
+            return (0, 170, 200)       # amber
 
-            # Background
-            (tw, th), _ = cv2.getTextSize(
-                alert, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        for alert in alerts[:5]:
+            color = _color(alert)
+            tag   = "ALERT"
+
+            # Measure tag chip
+            (tag_w, tag_h), _ = cv2.getTextSize(tag, font, tag_scale, 1)
+            tag_box_w = tag_w + 10
+
+            # Measure main text
+            (tw, th), _ = cv2.getTextSize(alert, font, font_scale, font_thick)
+
+            total_w = tag_box_w + pad_x + tw + pad_x
+            box_h   = th + pad_y * 2
+
+            bx, by = 8, y_cursor
+
+            # Dark pill background
             cv2.rectangle(frame,
-                          (8, y - th - 4),
-                          (8 + tw + 10, y + 6),
-                          (0, 0, 180), -1)
+                          (bx, by),
+                          (bx + total_w, by + box_h),
+                          (18, 18, 18), -1)
 
-            # Text
-            cv2.putText(frame, f"⚠ {alert}",
-                        (12, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                        (255, 255, 100), 2)
+            # Left colour stripe
+            cv2.rectangle(frame,
+                          (bx, by),
+                          (bx + 3, by + box_h),
+                          color, -1)
+
+            # Coloured tag chip
+            cv2.rectangle(frame,
+                          (bx + 3, by),
+                          (bx + 3 + tag_box_w, by + box_h),
+                          color, -1)
+            cv2.putText(frame, tag,
+                        (bx + 7, by + box_h - pad_y - 1),
+                        font, tag_scale,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Main alert text
+            cv2.putText(frame, alert,
+                        (bx + 3 + tag_box_w + pad_x,
+                         by + box_h - pad_y - 1),
+                        font, font_scale,
+                        (220, 220, 220), font_thick, cv2.LINE_AA)
+
+            y_cursor += box_h + gap
 
         return frame
