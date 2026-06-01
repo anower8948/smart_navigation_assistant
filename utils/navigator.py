@@ -38,6 +38,8 @@ import numpy as np
 
 # ── 7 Navigation Commands ──────────────────────────────────────────────────
 CMD_STOP         = "STOP"
+CMD_VERY_SLOW    = "Walk Very Slowly"
+CMD_SLOW         = "Walk Slowly"
 CMD_LEFT         = "Move Left"
 CMD_SLIGHT_LEFT  = "Slight Left"
 CMD_RIGHT        = "Move Right"
@@ -47,7 +49,8 @@ CMD_CLEAR        = "Path Clear"
 
 # Export list for other modules
 ALL_COMMANDS = [
-    CMD_STOP, CMD_LEFT, CMD_SLIGHT_LEFT,
+    CMD_STOP, CMD_VERY_SLOW, CMD_SLOW,
+    CMD_LEFT, CMD_SLIGHT_LEFT,
     CMD_RIGHT, CMD_SLIGHT_RIGHT,
     CMD_FORWARD, CMD_CLEAR
 ]
@@ -76,6 +79,8 @@ MIN_CONF = 0.40
 # ── Command colours (BGR) ─────────────────────────────────────────────────
 CMD_COLORS = {
     CMD_STOP:         (0,   0,   240),   # red
+    CMD_VERY_SLOW:    (0,   60,  220),   # deep red-orange
+    CMD_SLOW:         (0,   140, 255),   # orange
     CMD_LEFT:         (0,   140, 255),   # deep orange
     CMD_SLIGHT_LEFT:  (0,   200, 255),   # amber
     CMD_RIGHT:        (0,   140, 255),   # deep orange
@@ -87,6 +92,8 @@ CMD_COLORS = {
 # ── Arrow directions for HUD (angle in degrees, 0=up, CW positive) ────────
 CMD_ANGLES = {
     CMD_STOP:         None,    # special stop icon
+    CMD_VERY_SLOW:    None,    # special slow icon
+    CMD_SLOW:         None,    # special slow icon
     CMD_LEFT:         -90,     # full left
     CMD_SLIGHT_LEFT:  -45,     # diagonal up-left
     CMD_RIGHT:        +90,     # full right
