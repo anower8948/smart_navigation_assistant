@@ -1,28 +1,24 @@
 # ============================================================
-# Smart Navigation Assistant — Requirements
+# Smart Navigation Assistant v2 — Requirements
 # ============================================================
-# Install with:
+# GPU install (RTX 2060 / CUDA 11.8):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #   pip install -r requirements.txt
 #
-# GPU (RTX 2060 / CUDA 11.x) install:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CPU-only install:
 #   pip install -r requirements.txt
 # ============================================================
 
 # ── Core AI / Vision ─────────────────────────────────────────
 ultralytics>=8.0.0          # YOLOv8 framework
-torch>=2.0.0                # PyTorch (CUDA build recommended)
+torch>=2.0.0                # PyTorch (install CUDA build separately)
 torchvision>=0.15.0
 
 # ── Computer Vision ──────────────────────────────────────────
-opencv-python>=4.8.0        # Video I/O and display
+opencv-python>=4.8.0        # Video I/O, rendering, heatmap, radar
 
 # ── Text-to-Speech ───────────────────────────────────────────
-pyttsx3>=2.90               # Offline TTS (no internet required)
+pyttsx3>=2.90               # Offline TTS — no internet required
 
 # ── Numeric / Utility ────────────────────────────────────────
-numpy>=1.24.0
-
-# ── Optional: faster video decoding on GPU ───────────────────
-# Uncomment if you have ffmpeg compiled with CUDA:
-# av>=10.0.0
+numpy>=1.24.0               # Array ops — tracker, heatmap, distance

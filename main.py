@@ -3,26 +3,31 @@ main.py
 -------
 AI-Based Smart Navigation Assistant for Visually Impaired People
 ================================================================
-Entry point — orchestrates the full pipeline:
-    1. Open video file (or webcam)
-    2. Run YOLOv8 object detection on every frame
-    3. Estimate distances to detected obstacles
-    4. Decide navigation command (Left / Right / Forward / STOP)
-    5. Speak the command via TTS
-    6. Render annotated video on screen and save to output/result.mp4
+Advanced pipeline v2:
+
+  1. Open video file or webcam
+  2. YOLOv8n object detection (GPU-accelerated)
+  3. Distance estimation (pinhole camera model)
+  4. Multi-object tracking with trajectory history (ObjectTracker)
+  5. Navigation decision with LEFT/CENTER/RIGHT zone logic
+  6. Command smoothing / debouncing (CommandSmoother)
+  7. Speed-aware voice guidance (SpeedAwareVoice + pyttsx3)
+  8. Danger heatmap overlay (DangerHeatmap)
+  9. Mini radar / bird's-eye view panel (MiniRadar)
+ 10. Special situation alerts — traffic light, stop sign,
+     crowd detection, fast-approaching objects, blind spots (AlertEngine)
+ 11. Motion trail overlay per tracked object
+ 12. Saves annotated output to output/result.mp4
 
 Usage
 -----
-    python main.py                          # default sample video
-    python main.py --input videos/my.mp4   # custom video file
-    python main.py --webcam                 # webcam mode (device 0)
-    python main.py --help                   # all options
-
-Requirements
-------------
-    pip install -r requirements.txt
-
-Optimised for NVIDIA RTX 2060 GPU (CUDA 11.x+).
+    python main.py                         # default sample video
+    python main.py --input videos/my.mp4  # custom video
+    python main.py --webcam               # live webcam
+    python main.py --no-voice             # silent mode
+    python main.py --no-heatmap           # disable heatmap
+    python main.py --no-radar             # disable radar panel
+    python main.py --help                 # all options
 
 Author: AI Navigation Project
 """
@@ -36,18 +41,21 @@ import torch
 import numpy as np
 
 # ── Local module imports ──────────────────────────────────────────────────────
-from utils.detector          import ObjectDetector
+from utils.detector           import ObjectDetector
 from utils.distance_estimator import DistanceEstimator
 from utils.navigator          import Navigator, CMD_STOP, CMD_CLEAR
 from utils.voice_assistant    import VoiceAssistant
+from utils.tracker            import ObjectTracker
+from utils.heatmap            import DangerHeatmap, MiniRadar
+from utils.smoother           import CommandSmoother, SpeedAwareVoice
+from utils.alert_engine       import AlertEngine
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 DEFAULT_VIDEO   = "videos/sample_video.mp4"
 DEFAULT_MODEL   = "models/yolov8n.pt"
 OUTPUT_VIDEO    = "output/result.mp4"
-WINDOW_TITLE    = "Smart Navigation Assistant | Press Q to quit"
+WINDOW_TITLE    = "Smart Navigation Assistant v2  |  Q = quit  |  H = heatmap  |  R = radar"
 
-# Display scale (resize for screen if needed)
 DISPLAY_WIDTH   = 1280
 DISPLAY_HEIGHT  = 720
 
@@ -56,71 +64,74 @@ DISPLAY_HEIGHT  = 720
 #  Argument parser
 # ═════════════════════════════════════════════════════════════════════════════
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="AI Smart Navigation Assistant for Visually Impaired People"
+    p = argparse.ArgumentParser(
+        description="AI Smart Navigation Assistant v2 — Advanced Edition"
     )
-    parser.add_argument(
-        "--input", type=str, default=DEFAULT_VIDEO,
-        help=f"Path to input video file (default: {DEFAULT_VIDEO})"
-    )
-    parser.add_argument(
-        "--webcam", action="store_true",
-        help="Use webcam instead of video file"
-    )
-    parser.add_argument(
-        "--cam-id", type=int, default=0,
-        help="Webcam device ID (default: 0)"
-    )
-    parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL,
-        help=f"Path to YOLOv8 weights (default: {DEFAULT_MODEL})"
-    )
-    parser.add_argument(
-        "--output", type=str, default=OUTPUT_VIDEO,
-        help=f"Output video path (default: {OUTPUT_VIDEO})"
-    )
-    parser.add_argument(
-        "--conf", type=float, default=0.40,
-        help="Detection confidence threshold 0–1 (default: 0.40)"
-    )
-    parser.add_argument(
-        "--no-voice", action="store_true",
-        help="Disable text-to-speech voice guidance"
-    )
-    parser.add_argument(
-        "--no-display", action="store_true",
-        help="Run headlessly without showing a window (useful on servers)"
-    )
-    parser.add_argument(
-        "--save-output", action="store_true", default=True,
-        help="Save annotated video to output file (default: True)"
-    )
-    return parser.parse_args()
+    p.add_argument("--input",      type=str,   default=DEFAULT_VIDEO)
+    p.add_argument("--webcam",     action="store_true")
+    p.add_argument("--cam-id",     type=int,   default=0)
+    p.add_argument("--model",      type=str,   default=DEFAULT_MODEL)
+    p.add_argument("--output",     type=str,   default=OUTPUT_VIDEO)
+    p.add_argument("--conf",       type=float, default=0.40)
+    p.add_argument("--no-voice",   action="store_true")
+    p.add_argument("--no-display", action="store_true")
+    p.add_argument("--no-heatmap", action="store_true",
+                   help="Disable danger heatmap overlay")
+    p.add_argument("--no-radar",   action="store_true",
+                   help="Disable mini radar panel")
+    p.add_argument("--no-trails",  action="store_true",
+                   help="Disable motion trail overlay")
+    p.add_argument("--save-output", action="store_true", default=True)
+    return p.parse_args()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Utility: draw a heads-up FPS counter
+#  HUD helpers
 # ═════════════════════════════════════════════════════════════════════════════
-def draw_fps(frame: np.ndarray, fps: float) -> np.ndarray:
-    text = f"FPS: {fps:.1f}"
-    cv2.putText(frame, text, (10, 45),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 100), 2)
-    return frame
-
-
-def draw_title_bar(frame: np.ndarray) -> np.ndarray:
-    """Draw a top title banner."""
+def draw_topbar(frame: np.ndarray, fps: float,
+                frame_count: int, n_objects: int,
+                command: str, conf: float) -> np.ndarray:
+    """Top status bar with FPS, object count, command confidence."""
     h, w = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (w, 32), (15, 15, 15), -1)
-    cv2.putText(frame,
-                "AI Smart Navigation Assistant for Visually Impaired  |  YOLOv8n + COCO",
-                (10, 22),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 230, 255), 1)
+    cv2.rectangle(frame, (0, 0), (w, 32), (10, 10, 10), -1)
+
+    left  = f"Smart Navigation Assistant v2  |  GPU: {'YES' if torch.cuda.is_available() else 'CPU'}"
+    right = f"FPS: {fps:.1f}  |  Objects: {n_objects}  |  Cmd Confidence: {conf*100:.0f}%  |  Frame: {frame_count}"
+
+    cv2.putText(frame, left,  (8,  22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 220, 255), 1)
+    (rw, _), _ = cv2.getTextSize(right, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    cv2.putText(frame, right, (w - rw - 8, 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 200, 160), 1)
+    return frame
+
+
+def draw_approach_warning(frame: np.ndarray,
+                           active_tracks) -> np.ndarray:
+    """Flash a bold warning banner when any object is fast-approaching."""
+    fast = [t for t in active_tracks
+            if t.approach_status == "APPROACHING_FAST" and t.distance < 3.0]
+    if not fast:
+        return frame
+
+    h, w = frame.shape[:2]
+    msg  = f"! OBJECT APPROACHING FAST: {fast[0].class_name.upper()} !"
+    (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_DUPLEX, 0.85, 2)
+    bx = (w - tw) // 2
+
+    # Flashing effect — blink every 15 frames using time
+    if int(time.time() * 4) % 2 == 0:
+        cv2.rectangle(frame,
+                      (bx - 10, h // 2 - th - 14),
+                      (bx + tw + 10, h // 2 + 10),
+                      (0, 0, 200), -1)
+        cv2.putText(frame, msg, (bx, h // 2),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.85, (255, 255, 255), 2)
     return frame
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Open video source
+#  Video source
 # ═════════════════════════════════════════════════════════════════════════════
 def open_source(args) -> cv2.VideoCapture:
     if args.webcam:
@@ -129,35 +140,26 @@ def open_source(args) -> cv2.VideoCapture:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  DISPLAY_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DISPLAY_HEIGHT)
     else:
-        video_path = args.input
-        if not os.path.isfile(video_path):
-            print(f"[Main] ERROR: Video file not found: {video_path}")
-            print("[Main] Tip: Place a video in the 'videos/' folder "
-                  "or pass --input <path>")
+        if not os.path.isfile(args.input):
+            print(f"[Main] ERROR: Video file not found: {args.input}")
             sys.exit(1)
-        print(f"[Main] Opening video: {video_path}")
-        cap = cv2.VideoCapture(video_path)
+        print(f"[Main] Opening video: {args.input}")
+        cap = cv2.VideoCapture(args.input)
 
     if not cap.isOpened():
         print("[Main] ERROR: Could not open video source.")
         sys.exit(1)
-
     return cap
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  Setup output writer
-# ═════════════════════════════════════════════════════════════════════════════
 def setup_writer(cap: cv2.VideoCapture, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    print(f"[Main] Output will be saved to: {output_path}  "
-          f"({width}x{height} @ {fps:.1f} fps)")
+    print(f"[Main] Output → {output_path}  ({width}x{height} @ {fps:.1f} fps)")
     return writer
 
 
@@ -165,127 +167,162 @@ def setup_writer(cap: cv2.VideoCapture, output_path: str):
 #  Main pipeline
 # ═════════════════════════════════════════════════════════════════════════════
 def run(args):
-    print("\n" + "═" * 60)
-    print("  AI Smart Navigation Assistant — Starting")
-    print("═" * 60)
+    print("\n" + "═" * 65)
+    print("  AI Smart Navigation Assistant v2 — Advanced Edition")
+    print("═" * 65)
 
-    # ── GPU check ─────────────────────────────────────────────────────
     if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        print(f"[Main] GPU detected: {gpu_name}")
+        print(f"[Main] GPU: {torch.cuda.get_device_name(0)}")
     else:
-        print("[Main] No GPU detected — running on CPU (slower).")
+        print("[Main] No GPU — running on CPU.")
 
-    # ── Initialise modules ─────────────────────────────────────────────
-    detector   = ObjectDetector(model_path=args.model, confidence=args.conf)
-    estimator  = DistanceEstimator()
-    navigator  = Navigator()
-    voice      = VoiceAssistant(enabled=not args.no_voice)
+    # ── Init modules ──────────────────────────────────────────────────
+    detector  = ObjectDetector(model_path=args.model, confidence=args.conf)
+    estimator = DistanceEstimator()
+    navigator = Navigator()
+    voice     = VoiceAssistant(enabled=not args.no_voice)
+    tracker   = ObjectTracker()
+    heatmap   = DangerHeatmap()
+    radar     = MiniRadar()
+    smoother  = CommandSmoother()
+    speed_voice = SpeedAwareVoice(voice)
+    alert_eng = AlertEngine(voice_assistant=voice)
 
-    # ── Open source ────────────────────────────────────────────────────
+    # Feature toggles (can also be toggled with keyboard at runtime)
+    show_heatmap = not args.no_heatmap
+    show_radar   = not args.no_radar
+    show_trails  = not args.no_trails
+
+    # ── Open source + writer ──────────────────────────────────────────
     cap    = open_source(args)
-    writer = None
-    if args.save_output:
-        writer = setup_writer(cap, args.output)
+    writer = setup_writer(cap, args.output) if args.save_output else None
 
-    # ── Main loop ──────────────────────────────────────────────────────
-    frame_count  = 0
-    fps_display  = 0.0
-    t_start_loop = time.time()
-    prev_cmd     = ""
+    frame_count = 0
+    fps_display = 0.0
+    t_loop      = time.time()
+    prev_stable = ""
 
-    print("\n[Main] Processing started. Press 'Q' in window to quit.\n")
+    print("\n[Main] Running. Keys: Q=quit | H=toggle heatmap | "
+          "R=toggle radar | T=toggle trails\n")
 
     try:
         while True:
-            t_frame = time.time()
+            t0 = time.time()
             ret, frame = cap.read()
-
             if not ret:
-                print("[Main] End of video stream.")
+                print("[Main] End of stream.")
                 break
 
-            # ── Resize for consistent processing ──────────────────────
-            h_orig, w_orig = frame.shape[:2]
-            if w_orig != DISPLAY_WIDTH or h_orig != DISPLAY_HEIGHT:
-                frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
-
-            frame_h, frame_w = frame.shape[:2]
+            # Resize
+            frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+            fh, fw = frame.shape[:2]
 
             # Update module sizes
-            navigator.update_frame_size(frame_w, frame_h)
-            estimator.update_frame_size(frame_h)
+            navigator.update_frame_size(fw, fh)
+            estimator.update_frame_size(fh)
+            heatmap.update_size(fw, fh)
 
-            # ── Detection ──────────────────────────────────────────────
+            # ── Detection ─────────────────────────────────────────────
             detections = detector.detect(frame)
 
-            # ── Distance estimation ────────────────────────────────────
+            # ── Distance estimation ───────────────────────────────────
             distances = estimator.estimate_all(detections)
 
-            # ── Navigation decision ────────────────────────────────────
-            command = navigator.decide(detections, distances)
+            # ── Tracking ──────────────────────────────────────────────
+            active_tracks = tracker.update(detections, distances)
 
-            # ── Voice guidance (only on command change) ────────────────
-            if command != prev_cmd:
-                voice.speak(command)
-                prev_cmd = command
+            # ── Navigation decision ───────────────────────────────────
+            raw_cmd    = navigator.decide(detections, distances)
+            stable_cmd = smoother.update(raw_cmd)
+            cmd_conf   = smoother.confidence
 
-            # ── Draw detections ────────────────────────────────────────
+            # ── Voice guidance ────────────────────────────────────────
+            min_dist = min(distances.values(), default=99.0)
+            if stable_cmd != prev_stable:
+                speed_voice.speak(stable_cmd, min_dist)
+                prev_stable = stable_cmd
+
+            # ── Special alerts ────────────────────────────────────────
+            alerts = alert_eng.analyse(detections, distances,
+                                       active_tracks, fw)
+
+            # ── Render: heatmap (bottom layer) ────────────────────────
+            if show_heatmap:
+                heatmap.update(detections, distances)
+                frame = heatmap.draw_overlay(frame)
+
+            # ── Render: bounding boxes ────────────────────────────────
             frame = detector.draw_detections(frame, detections, distances)
 
-            # ── Draw HUD (zones, command banner, object panel) ─────────
-            frame = navigator.draw_hud(frame, command, detections, distances)
+            # ── Render: motion trails ─────────────────────────────────
+            if show_trails:
+                frame = tracker.draw_trails(frame, active_tracks)
 
-            # ── FPS counter ────────────────────────────────────────────
-            elapsed = time.time() - t_frame
-            fps_display = 1.0 / elapsed if elapsed > 0 else 0.0
-            frame = draw_fps(frame, fps_display)
-            frame = draw_title_bar(frame)
+            # ── Render: navigator HUD ─────────────────────────────────
+            frame = navigator.draw_hud(frame, stable_cmd,
+                                        detections, distances)
 
-            # ── Write output ───────────────────────────────────────────
+            # ── Render: approach warning ──────────────────────────────
+            frame = draw_approach_warning(frame, active_tracks)
+
+            # ── Render: alert banners ─────────────────────────────────
+            frame = alert_eng.draw_alerts(frame, alerts)
+
+            # ── Render: radar ─────────────────────────────────────────
+            if show_radar:
+                frame = radar.draw(frame, detections, distances, fw, fh)
+
+            # ── Render: top status bar ────────────────────────────────
+            fps_display = 1.0 / max(time.time() - t0, 1e-6)
+            frame = draw_topbar(frame, fps_display, frame_count,
+                                 len(detections), stable_cmd, cmd_conf)
+
+            # ── Write output ──────────────────────────────────────────
             if writer:
                 writer.write(frame)
 
-            # ── Display ────────────────────────────────────────────────
+            # ── Display ───────────────────────────────────────────────
             if not args.no_display:
                 cv2.imshow(WINDOW_TITLE, frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord("q") or key == ord("Q") or key == 27:
+                if key in (ord("q"), ord("Q"), 27):
                     print("[Main] User quit.")
                     break
+                elif key in (ord("h"), ord("H")):
+                    show_heatmap = not show_heatmap
+                    print(f"[Main] Heatmap: {'ON' if show_heatmap else 'OFF'}")
+                elif key in (ord("r"), ord("R")):
+                    show_radar = not show_radar
+                    print(f"[Main] Radar: {'ON' if show_radar else 'OFF'}")
+                elif key in (ord("t"), ord("T")):
+                    show_trails = not show_trails
+                    print(f"[Main] Trails: {'ON' if show_trails else 'OFF'}")
 
             frame_count += 1
 
-            # Progress log every 50 frames
-            if frame_count % 50 == 0:
-                total_elapsed = time.time() - t_start_loop
-                avg_fps = frame_count / total_elapsed
+            if frame_count % 60 == 0:
+                avg = frame_count / (time.time() - t_loop)
                 print(f"[Main] Frame {frame_count:5d} | "
-                      f"FPS {avg_fps:.1f} | "
-                      f"Objects: {len(detections):2d} | "
-                      f"Command: {command}")
+                      f"FPS {avg:.1f} | Objects {len(detections)} | "
+                      f"Tracks {len(active_tracks)} | Cmd: {stable_cmd}")
 
     except KeyboardInterrupt:
-        print("\n[Main] Interrupted by user.")
+        print("\n[Main] Interrupted.")
 
     finally:
-        # ── Cleanup ────────────────────────────────────────────────────
         cap.release()
         if writer:
             writer.release()
-            print(f"\n[Main] Output saved: {args.output}")
+            print(f"\n[Main] Saved: {args.output}")
         cv2.destroyAllWindows()
         voice.stop()
 
-        total_time = time.time() - t_start_loop
-        avg_fps    = frame_count / total_time if total_time > 0 else 0
-        print(f"\n[Main] Processed {frame_count} frames in {total_time:.1f}s "
-              f"(avg {avg_fps:.1f} FPS)")
+        total = time.time() - t_loop
+        print(f"[Main] {frame_count} frames in {total:.1f}s "
+              f"(avg {frame_count/max(total,1):.1f} FPS)")
         print("[Main] Done.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  Entry point
 # ═════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     args = parse_args()
