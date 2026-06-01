@@ -1,14 +1,16 @@
 """
 smoother.py
 -----------
-Command smoother — fast response, no flicker.
+Command smoother tuned for 7-command 5-zone navigation.
 
-Changes from v1:
-  - CONFIRM_FRAMES reduced 4 → 2  (half the lag)
-  - STOP and CMD_RIGHT/LEFT in danger zone bypass instantly
-  - Uses majority-vote over a rolling window (not just consecutive count)
-    so a single bad frame doesn't reset the counter
-  - SpeedAwareVoice: shorter cooldown when close (0.8s vs 2.5s default)
+Per-command confirm windows:
+  STOP             → 1 frame  (instant, safety)
+  Move Left/Right  → 2 frames (fast response)
+  Slight Left/Right→ 2 frames (fast response)
+  Move Forward     → 3 frames (a little more stable)
+  Path Clear       → 3 frames (stable)
+
+Uses majority vote over window so one noisy frame doesn't reset.
 
 Author: AI Navigation Project
 """
@@ -16,47 +18,60 @@ Author: AI Navigation Project
 from collections import deque
 import time
 
-# ── Tuning ──────────────────────────────────────────────────────────────────
-CONFIRM_FRAMES  = 2     # frames before a new command is accepted (was 4)
-VOTE_MAJORITY   = 0.6   # fraction of window that must agree
+from utils.navigator import (
+    CMD_STOP, CMD_LEFT, CMD_SLIGHT_LEFT,
+    CMD_RIGHT, CMD_SLIGHT_RIGHT, CMD_FORWARD, CMD_CLEAR
+)
 
-# Commands that are accepted instantly (no delay)
-INSTANT_COMMANDS = {"STOP", "STOP !"}
+# Per-command confirm window sizes
+CONFIRM_WINDOWS = {
+    CMD_STOP:          1,
+    CMD_LEFT:          2,
+    CMD_SLIGHT_LEFT:   2,
+    CMD_RIGHT:         2,
+    CMD_SLIGHT_RIGHT:  2,
+    CMD_FORWARD:       3,
+    CMD_CLEAR:         3,
+}
 
-# Voice cooldowns by urgency (seconds)
-COOLDOWN_CRITICAL = 0.8    # < 1m
-COOLDOWN_DANGER   = 1.5    # 1–2.5m
-COOLDOWN_NORMAL   = 2.5    # > 2.5m
+DEFAULT_WINDOW  = 2
+INSTANT_CMDS    = {CMD_STOP}
+
+# Voice cooldowns (seconds) by proximity
+COOLDOWN_CRITICAL = 0.8
+COOLDOWN_DANGER   = 1.5
+COOLDOWN_NORMAL   = 2.8
 
 
 class CommandSmoother:
     """
-    Fast majority-vote smoother for navigation commands.
-    Accepts a new command once it holds the majority in a 2-frame window.
+    Majority-vote smoother with per-command window sizes.
     Safety commands (STOP) are always instant.
     """
 
-    def __init__(self, window: int = CONFIRM_FRAMES):
-        self.window           = window
-        self._buf             = deque(maxlen=window)
-        self._current         = "Path Clear"
+    def __init__(self):
+        self._window   = DEFAULT_WINDOW
+        self._buf      = deque(maxlen=6)   # large enough for all windows
+        self._current  = CMD_CLEAR
 
     def update(self, raw: str) -> str:
-        # Instant pass-through for safety commands
-        if raw in INSTANT_COMMANDS:
+        # Instant for safety
+        if raw in INSTANT_CMDS:
             self._current = raw
             self._buf.clear()
             return self._current
 
         self._buf.append(raw)
+        win = CONFIRM_WINDOWS.get(raw, DEFAULT_WINDOW)
 
-        # Majority vote — most frequent command in the window wins
-        if len(self._buf) >= self.window:
+        # Majority vote over the last `win` frames
+        recent = list(self._buf)[-win:]
+        if len(recent) >= win:
             counts = {}
-            for c in self._buf:
+            for c in recent:
                 counts[c] = counts.get(c, 0) + 1
             winner, votes = max(counts.items(), key=lambda x: x[1])
-            if votes / self.window >= VOTE_MAJORITY:
+            if votes >= (win + 1) // 2:   # simple majority
                 self._current = winner
 
         return self._current
@@ -65,25 +80,37 @@ class CommandSmoother:
     def confidence(self) -> float:
         if not self._buf:
             return 1.0
-        matches = sum(1 for c in self._buf if c == self._current)
-        return matches / len(self._buf)
+        win = CONFIRM_WINDOWS.get(self._current, DEFAULT_WINDOW)
+        recent = list(self._buf)[-win:]
+        if not recent:
+            return 1.0
+        return sum(1 for c in recent if c == self._current) / len(recent)
 
     def reset(self):
         self._buf.clear()
-        self._current = "Path Clear"
+        self._current = CMD_CLEAR
 
 
 class SpeedAwareVoice:
     """
-    Speaks navigation commands with:
-      - Faster speech rate near danger
-      - "WARNING" / "Caution" prefix when close
-      - Adaptive cooldown — speaks more often when danger is near
+    Speaks navigation commands with adaptive rate and urgency prefix.
+    Tuned for 7 commands — slight turns use softer language.
     """
 
+    # What to actually say for each command
+    SPEECH_TEXT = {
+        CMD_STOP:          "WARNING. Stop immediately.",
+        CMD_LEFT:          "Move Left.",
+        CMD_SLIGHT_LEFT:   "Bear Left.",
+        CMD_RIGHT:         "Move Right.",
+        CMD_SLIGHT_RIGHT:  "Bear Right.",
+        CMD_FORWARD:       "Move Forward.",
+        CMD_CLEAR:         "Path clear. Move Forward.",
+    }
+
     def __init__(self, voice_assistant,
-                 normal_rate: int = 170,
-                 urgent_rate: int = 210):
+                 normal_rate: int = 165,
+                 urgent_rate: int = 205):
         self._va          = voice_assistant
         self._normal_rate = normal_rate
         self._urgent_rate = urgent_rate
@@ -97,21 +124,20 @@ class SpeedAwareVoice:
 
         now = time.time()
 
-        # Choose cooldown by proximity
-        if min_distance < 1.0:
+        # Adaptive cooldown by proximity
+        if min_distance < 1.2:
             cooldown = COOLDOWN_CRITICAL
         elif min_distance < 2.5:
             cooldown = COOLDOWN_DANGER
         else:
             cooldown = COOLDOWN_NORMAL
 
-        # Skip if same command and still within cooldown
         same = (command == self._last_cmd)
         if same and (now - self._last_t) < cooldown:
             return
 
-        # Adjust TTS rate by urgency
-        is_urgent = min_distance < 2.5 or command == "STOP"
+        # Adjust TTS speed
+        is_urgent = min_distance < 2.0 or command == CMD_STOP
         if is_urgent and not self._last_urgent:
             self._va.set_rate(self._urgent_rate)
             self._last_urgent = True
@@ -119,13 +145,14 @@ class SpeedAwareVoice:
             self._va.set_rate(self._normal_rate)
             self._last_urgent = False
 
-        # Prefix
-        if min_distance < 1.0:
-            text = f"WARNING. {command}"
+        # Speak the natural-language version
+        text = self.SPEECH_TEXT.get(command, command)
+
+        # Add proximity prefix for close obstacles
+        if min_distance < 1.2:
+            text = f"WARNING! {text}"
         elif min_distance < 2.0:
-            text = f"Caution. {command}"
-        else:
-            text = command
+            text = f"Caution. {text}"
 
         self._va.speak(text)
         self._last_cmd = command
