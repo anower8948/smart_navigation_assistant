@@ -44,8 +44,8 @@ import numpy as np
 from utils.detector           import ObjectDetector
 from utils.distance_estimator import DistanceEstimator
 from utils.navigator          import (Navigator, CMD_STOP, CMD_CLEAR,
-                                      CMD_LEFT, CMD_RIGHT,
-                                      CMD_SLIGHT_LEFT, CMD_SLIGHT_RIGHT,
+                                      CMD_LEFT, CMD_LEFT_MID, CMD_FORWARD,
+                                      CMD_RIGHT_MID, CMD_RIGHT,
                                       CMD_VERY_SLOW, CMD_SLOW)
 from utils.voice_assistant    import VoiceAssistant
 from utils.tracker            import ObjectTracker
@@ -246,8 +246,8 @@ def run(args):
                 speed_voice.speak(stable_cmd, min_dist)
                 prev_stable = stable_cmd
             elif stable_cmd in (CMD_STOP, CMD_VERY_SLOW, CMD_SLOW,
-                                CMD_LEFT, CMD_RIGHT,
-                                CMD_SLIGHT_LEFT, CMD_SLIGHT_RIGHT) \
+                                CMD_LEFT, CMD_LEFT_MID,
+                                CMD_RIGHT_MID, CMD_RIGHT) \
                     and min_dist < 2.0:
                 speed_voice.speak(stable_cmd, min_dist)  # repeat for proximity cmds
 

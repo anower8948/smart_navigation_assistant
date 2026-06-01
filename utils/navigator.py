@@ -1,34 +1,30 @@
 """
 navigator.py
 ------------
-5-Zone Precision Navigation Engine
-===================================
-Designed for real street walking — gives gentle diagonal guidance
-instead of harsh hard-left/hard-right commands.
+5-Direction Precision Navigation Engine
+========================================
 
-5 Zones (equal 20% slices of frame width):
-    ┌────────┬──────────┬──────────┬──────────┬────────┐
-    │  FAR   │   MID    │  CENTER  │   MID    │  FAR   │
-    │  LEFT  │   LEFT   │          │  RIGHT   │ RIGHT  │
-    │ 0-20%  │ 20-40%   │ 40-60%   │ 60-80%   │80-100% │
-    └────────┴──────────┴──────────┴──────────┴────────┘
+Direction commands (left → right):
+    Move Left  |  Move Left Middle  |  Move Forward  |  Move Right Middle  |  Move Right
 
-7 Commands (priority order):
-    1. STOP             — obstacle < STOP_DIST in CENTER
-    2. Move Left        — CENTER/MID-LEFT blocked, far-left is open
-    3. Slight Left      — CENTER partially blocked, mid-left is cleaner
-    4. Move Right       — CENTER/MID-RIGHT blocked, far-right is open
-    5. Slight Right     — CENTER partially blocked, mid-right is cleaner
-    6. Move Forward     — obstacles exist but path is walkable
-    7. Path Clear       — no obstacles within range
+    These map directly to the 5 screen zones:
+    ┌──────────┬────────────────┬──────────────┬─────────────────┬──────────┐
+    │   FAR    │      MID       │    CENTER    │       MID       │   FAR    │
+    │   LEFT   │     LEFT       │   FORWARD    │      RIGHT      │  RIGHT   │
+    │  0–20%   │   20–40%       │   40–60%     │    60–80%       │ 80–100%  │
+    │ Move Left│ Move Left Mid  │ Move Forward │ Move Right Mid  │Move Right│
+    └──────────┴────────────────┴──────────────┴─────────────────┴──────────┘
 
-Decision algorithm:
-    - Each zone gets a "danger score" = sum of (1/distance) for all
-      obstacles in that zone (closer obstacle = higher danger)
-    - CENTER danger is the primary trigger
-    - LEFT vs RIGHT decision compares weighted danger of the two halves
-    - Diagonal (Slight) vs Full turn depends on how blocked CENTER is
-      and how clear the mid zones are
+Speed tiers (checked FIRST, highest priority):
+    < 0.40m   → STOP
+    0.40–0.69m → Walk Very Slowly
+    0.70–1.99m → Walk Slowly
+    >= 2.0m   → direction logic
+
+Direction logic:
+    - Each zone gets a danger score = sum(1/dist) for obstacles inside it
+    - The SAFEST zone (lowest danger) becomes the recommended direction
+    - Ties broken by preferring the zone closest to current path (center)
 
 Author: AI Navigation Project
 """
@@ -36,87 +32,79 @@ Author: AI Navigation Project
 import cv2
 import numpy as np
 
-# ── 7 Navigation Commands ──────────────────────────────────────────────────
-CMD_STOP         = "STOP"
-CMD_VERY_SLOW    = "Walk Very Slowly"
-CMD_SLOW         = "Walk Slowly"
-CMD_LEFT         = "Move Left"
-CMD_SLIGHT_LEFT  = "Slight Left"
-CMD_RIGHT        = "Move Right"
-CMD_SLIGHT_RIGHT = "Slight Right"
-CMD_FORWARD      = "Move Forward"
-CMD_CLEAR        = "Path Clear"
+# ── Direction Commands (left → right) ─────────────────────────────────────
+CMD_STOP        = "STOP"
+CMD_VERY_SLOW   = "Walk Very Slowly"
+CMD_SLOW        = "Walk Slowly"
+CMD_LEFT        = "Move Left"
+CMD_LEFT_MID    = "Move Left Middle"
+CMD_FORWARD     = "Move Forward"
+CMD_RIGHT_MID   = "Move Right Middle"
+CMD_RIGHT       = "Move Right"
+CMD_CLEAR       = "Path Clear"
 
-# Export list for other modules
 ALL_COMMANDS = [
     CMD_STOP, CMD_VERY_SLOW, CMD_SLOW,
-    CMD_LEFT, CMD_SLIGHT_LEFT,
-    CMD_RIGHT, CMD_SLIGHT_RIGHT,
-    CMD_FORWARD, CMD_CLEAR
+    CMD_LEFT, CMD_LEFT_MID, CMD_FORWARD,
+    CMD_RIGHT_MID, CMD_RIGHT, CMD_CLEAR
 ]
 
-# ── Zone boundaries (5 equal zones, 20% each) ─────────────────────────────
-# Zone indices: 0=FAR_LEFT  1=MID_LEFT  2=CENTER  3=MID_RIGHT  4=FAR_RIGHT
+# ── 5 Zones (equal 20% slices) ────────────────────────────────────────────
+# Each zone maps 1-to-1 to a direction command
 ZONE_BOUNDS = [0.0, 0.20, 0.40, 0.60, 0.80, 1.0]
-ZONE_NAMES  = ["FAR_LEFT", "MID_LEFT", "CENTER", "MID_RIGHT", "FAR_RIGHT"]
 Z_FL, Z_ML, Z_C, Z_MR, Z_FR = 0, 1, 2, 3, 4
 
-# ── Distance thresholds (metres) ──────────────────────────────────────────
-#  Speed tiers (user-defined rules):
-#    < 0.40m          →  STOP
-#    0.40 – 0.69m     →  Walk Very Slowly
-#    0.70 – 1.99m     →  Walk Slowly
-#    >= 2.0m          →  direction logic (free to walk)
-STOP_DIST      = 0.40   # hard stop threshold
-VERY_SLOW_DIST = 0.69   # walk very slowly upper bound
-SLOW_DIST      = 1.99   # walk slowly upper bound
-FREE_WALK_DIST = 2.0    # >= this → full direction navigation
+# Zone → recommended direction when that zone is the safest
+ZONE_TO_CMD = {
+    Z_FL: CMD_LEFT,
+    Z_ML: CMD_LEFT_MID,
+    Z_C:  CMD_FORWARD,
+    Z_MR: CMD_RIGHT_MID,
+    Z_FR: CMD_RIGHT,
+}
 
-#  Direction / zone thresholds
-SLIGHT_DIST    = 3.0    # mild centre blockage → slight turn
-FULL_TURN_DIST = 5.0    # strong centre blockage → full turn
-MAX_NAV_DIST   = 6.0    # ignore obstacles beyond this distance
+# ── Distance / Speed Thresholds ───────────────────────────────────────────
+STOP_DIST      = 0.40   # < 0.40m  → STOP (uses global closest)
+VERY_SLOW_DIST = 0.69   # 0.40–0.69m → Walk Very Slowly (center only)
+SLOW_DIST      = 1.99   # 0.70–1.99m → Walk Slowly     (center only)
+FREE_WALK_DIST = 2.0    # >= 2.0m  → full direction logic
 
-# ── Danger score thresholds ────────────────────────────────────────────────
-# danger_score = sum(1/dist) for all obstacles in zone
-# Higher = more dangerous
-DANGER_SLIGHT   = 0.25   # mild blockage → slight turn
-DANGER_FULL     = 0.60   # significant blockage → full turn
+MAX_NAV_DIST   = 6.0    # ignore obstacles beyond this
 
-# ── Minimum detection confidence for navigation ────────────────────────────
+# ── Minimum confidence ────────────────────────────────────────────────────
 MIN_CONF = 0.40
 
 # ── Command colours (BGR) ─────────────────────────────────────────────────
 CMD_COLORS = {
-    CMD_STOP:         (0,   0,   240),   # red
-    CMD_VERY_SLOW:    (0,   60,  220),   # deep red-orange
-    CMD_SLOW:         (0,   140, 255),   # orange
-    CMD_LEFT:         (0,   140, 255),   # deep orange
-    CMD_SLIGHT_LEFT:  (0,   200, 255),   # amber
-    CMD_RIGHT:        (0,   140, 255),   # deep orange
-    CMD_SLIGHT_RIGHT: (0,   200, 255),   # amber
-    CMD_FORWARD:      (0,   210, 0),     # green
-    CMD_CLEAR:        (0,   230, 100),   # bright green
+    CMD_STOP:       (0,   0,   240),   # red
+    CMD_VERY_SLOW:  (0,   50,  220),   # deep red-orange
+    CMD_SLOW:       (0,   120, 255),   # orange
+    CMD_LEFT:       (0,   120, 255),   # orange
+    CMD_LEFT_MID:   (0,   190, 255),   # amber
+    CMD_FORWARD:    (0,   210, 0),     # green
+    CMD_RIGHT_MID:  (0,   190, 255),   # amber
+    CMD_RIGHT:      (0,   120, 255),   # orange
+    CMD_CLEAR:      (0,   230, 100),   # bright green
 }
 
-# ── Arrow directions for HUD (angle in degrees, 0=up, CW positive) ────────
+# ── Arrow angles (degrees, 0=up, CW positive) ─────────────────────────────
 CMD_ANGLES = {
-    CMD_STOP:         None,    # special stop icon
-    CMD_VERY_SLOW:    None,    # special slow icon
-    CMD_SLOW:         None,    # special slow icon
-    CMD_LEFT:         -90,     # full left
-    CMD_SLIGHT_LEFT:  -45,     # diagonal up-left
-    CMD_RIGHT:        +90,     # full right
-    CMD_SLIGHT_RIGHT: +45,     # diagonal up-right
-    CMD_FORWARD:      0,       # straight up
-    CMD_CLEAR:        0,       # straight up
+    CMD_STOP:       None,
+    CMD_VERY_SLOW:  None,
+    CMD_SLOW:       None,
+    CMD_LEFT:       -90,    # ← full left
+    CMD_LEFT_MID:   -45,    # ↖ diagonal left
+    CMD_FORWARD:    0,      # ↑ straight ahead
+    CMD_RIGHT_MID:  +45,    # ↗ diagonal right
+    CMD_RIGHT:      +90,    # → full right
+    CMD_CLEAR:      0,      # ↑ straight ahead
 }
 
 
 class Navigator:
     """
-    5-zone precision navigation engine.
-    Produces 7 graduated commands for smooth real-world walking guidance.
+    5-direction navigation engine.
+    Picks the safest of 5 walking directions based on zone danger scores.
     """
 
     def __init__(self, frame_width: int = 1280, frame_height: int = 720):
@@ -128,35 +116,24 @@ class Navigator:
         self.fw = w
         self.fh = h
 
-    # ── Zone classification ────────────────────────────────────────────────
     def _zone(self, cx: int) -> int:
-        """Return zone index (0–4) for a given center_x pixel."""
+        """Map pixel x → zone index 0–4."""
         r = cx / self.fw
-        for i, bound in enumerate(ZONE_BOUNDS[1:]):
-            if r < bound:
+        for i in range(5):
+            if r < ZONE_BOUNDS[i + 1]:
                 return i
         return Z_FR
 
-    # ── Danger score for a zone ────────────────────────────────────────────
     @staticmethod
     def _danger(dists: list) -> float:
-        """
-        Danger score = sum(1/d) for each obstacle distance d.
-        Closer obstacles contribute much more than far ones.
-        Returns 0.0 if no obstacles.
-        """
-        if not dists:
-            return 0.0
-        return sum(1.0 / max(d, 0.1) for d in dists)
+        """Danger score = sum(1/dist). Empty zone = 0."""
+        return sum(1.0 / max(d, 0.1) for d in dists) if dists else 0.0
 
     # ── Core decision ──────────────────────────────────────────────────────
     def decide(self, detections: list[dict], distances: dict) -> str:
-        """
-        Analyse 5 zones and return the most appropriate navigation command.
-        """
-        # Collect distances per zone
-        zone_dists: list[list] = [[] for _ in range(5)]
 
+        # Collect obstacle distances per zone
+        zone_dists: list[list] = [[] for _ in range(5)]
         for idx, det in enumerate(detections):
             if det["confidence"] < MIN_CONF:
                 continue
@@ -166,75 +143,40 @@ class Navigator:
             z = self._zone(det["center_x"])
             zone_dists[z].append(dist)
 
-        # Danger scores per zone
-        ds = [self._danger(zone_dists[z]) for z in range(5)]
+        # Closest obstacle in each zone
+        zone_min = [min(zd, default=99.0) for zd in zone_dists]
+        global_min = min(zone_min)
+        cc_min     = zone_min[Z_C]
 
-        # Closest distance across ALL zones (global)
-        all_dists_flat = [d for zd in zone_dists for d in zd]
-        global_min = min(all_dists_flat, default=99.0)
-
-        # Closest distance in CENTER zone only
-        cc_min = min(zone_dists[Z_C], default=99.0)
-
-        # ══════════════════════════════════════════════════════════════
-        #  SPEED / SAFETY TIER  (based on closest CENTER obstacle)
-        # ══════════════════════════════════════════════════════════════
-
-        # ── Tier 1: STOP — < 0.40m anywhere ──────────────────────────
-        if global_min < STOP_DIST:           # < 0.40m
+        # ── Speed tiers (priority over direction) ─────────────────────────
+        if global_min < STOP_DIST:            # < 0.40m anywhere
             return self._set(CMD_STOP)
-
-        # ── Tier 2: Walk Very Slowly — center 0.40–0.69m ─────────────
-        if cc_min <= VERY_SLOW_DIST:         # 0.40–0.69m
+        if cc_min <= VERY_SLOW_DIST:          # 0.40–0.69m center
             return self._set(CMD_VERY_SLOW)
-
-        # ── Tier 3: Walk Slowly — center 0.70–1.99m ──────────────────
-        if cc_min <= SLOW_DIST:              # 0.70–1.99m
+        if cc_min <= SLOW_DIST:               # 0.70–1.99m center
             return self._set(CMD_SLOW)
 
-        # ══════════════════════════════════════════════════════════════
-        #  DIRECTION LOGIC  (center obstacle >= 2.0m → navigate freely)
-        # ══════════════════════════════════════════════════════════════
+        # ── Direction logic (>= 2.0m) ─────────────────────────────────────
+        # No obstacles at all → clear
+        if global_min == 99.0:
+            return self._set(CMD_CLEAR)
 
-        # ── Tier 4: Center blocked ≥ 2m → steer to open side ─────────
-        if ds[Z_C] > 0:
-            # Weighted danger of left half vs right half
-            left_danger  = ds[Z_FL] * 0.5 + ds[Z_ML] * 1.0
-            right_danger = ds[Z_MR] * 1.0 + ds[Z_FR] * 0.5
+        # Danger score per zone
+        ds = [self._danger(zone_dists[z]) for z in range(5)]
 
-            # Full turn vs slight nudge based on danger intensity
-            full_turn   = (ds[Z_C] >= DANGER_FULL) or (cc_min < FULL_TURN_DIST)
-            slight_turn = (ds[Z_C] >= DANGER_SLIGHT) and not full_turn
+        # Find the safest zone (lowest danger score)
+        # Tie-break: prefer zones closer to center (index 2)
+        # Priority order for equal scores: C > ML > MR > FL > FR
+        center_pref = [2, 1, 3, 0, 4]   # preference order (center-first)
 
-            if left_danger <= right_danger:
-                if slight_turn and ds[Z_ML] < DANGER_SLIGHT:
-                    return self._set(CMD_SLIGHT_LEFT)
-                return self._set(CMD_LEFT)
-            else:
-                if slight_turn and ds[Z_MR] < DANGER_SLIGHT:
-                    return self._set(CMD_SLIGHT_RIGHT)
-                return self._set(CMD_RIGHT)
+        best_zone  = None
+        best_score = float("inf")
+        for z in center_pref:
+            if ds[z] < best_score:
+                best_score = ds[z]
+                best_zone  = z
 
-        # ── Tier 5: Side-only obstacles (center clear) ────────────────
-        # Mid-left busy → nudge right
-        if ds[Z_ML] >= DANGER_SLIGHT and ds[Z_MR] < DANGER_SLIGHT:
-            return self._set(CMD_SLIGHT_RIGHT)
-        # Mid-right busy → nudge left
-        if ds[Z_MR] >= DANGER_SLIGHT and ds[Z_ML] < DANGER_SLIGHT:
-            return self._set(CMD_SLIGHT_LEFT)
-        # Far-left busy → nudge right
-        if ds[Z_FL] >= DANGER_SLIGHT and ds[Z_FR] < DANGER_SLIGHT:
-            return self._set(CMD_SLIGHT_RIGHT)
-        # Far-right busy → nudge left
-        if ds[Z_FR] >= DANGER_SLIGHT and ds[Z_FL] < DANGER_SLIGHT:
-            return self._set(CMD_SLIGHT_LEFT)
-
-        # ── Tier 6: Obstacles exist but all far ───────────────────────
-        if any(zone_dists):
-            return self._set(CMD_FORWARD)
-
-        # ── Tier 7: Truly clear ───────────────────────────────────────
-        return self._set(CMD_CLEAR)
+        return self._set(ZONE_TO_CMD[best_zone])
 
     def _set(self, cmd: str) -> str:
         self._last = cmd
@@ -246,20 +188,11 @@ class Navigator:
 
     def draw_hud(self, frame: np.ndarray, command: str,
                  detections: list[dict], distances: dict) -> np.ndarray:
-        """
-        Render the full navigation HUD:
-          - 5-zone dividers with per-zone danger tint
-          - Directional path highlight (shows WHERE to walk)
-          - Large command banner + diagonal arrow
-          - Nearest obstacle badge
-        """
         h, w  = frame.shape[:2]
         color = CMD_COLORS.get(command, (255, 255, 255))
+        zx    = [int(w * b) for b in ZONE_BOUNDS]   # 6 x-boundaries
 
-        # Zone x-coordinates
-        zx = [int(w * b) for b in ZONE_BOUNDS]  # 6 boundary x positions
-
-        # Danger scores for current frame
+        # Danger scores for rendering
         zone_dists: list[list] = [[] for _ in range(5)]
         for idx, det in enumerate(detections):
             if det["confidence"] < MIN_CONF:
@@ -267,161 +200,137 @@ class Navigator:
             dist = distances.get(idx, 99.0)
             if dist > MAX_NAV_DIST:
                 continue
-            z = self._zone(det["center_x"])
-            zone_dists[z].append(dist)
+            zone_dists[self._zone(det["center_x"])].append(dist)
         ds = [self._danger(zone_dists[z]) for z in range(5)]
 
-        overlay = frame.copy()
-
-        # ── Per-zone danger tint ───────────────────────────────────────────
         TOP = 35
-        BOT = h - 78
+        BOT = h - 82
 
+        # ── Zone danger tints ──────────────────────────────────────────────
+        overlay = frame.copy()
         for z in range(5):
-            x1, x2 = zx[z], zx[z + 1]
-            d = ds[z]
-            if d == 0:
-                continue
-            # Intensity: clamp danger to 0–1 range for colour
-            intensity = min(d / 1.5, 1.0)
-            # Red channel increases with danger
-            r = int(60 * intensity)
-            cv2.rectangle(overlay, (x1, TOP), (x2, BOT),
-                          (0, 0, r), -1)
+            if ds[z] > 0:
+                intensity = min(ds[z] / 1.5, 1.0)
+                cv2.rectangle(overlay,
+                              (zx[z], TOP), (zx[z+1], BOT),
+                              (0, 0, int(60 * intensity)), -1)
 
-        # ── Path highlight — show the recommended walk corridor ────────────
-        walk_x1, walk_x2 = self._walk_corridor(command, zx, w)
-        cv2.rectangle(overlay, (walk_x1, TOP), (walk_x2, BOT),
-                      (0, 60, 0), -1)   # green tint = safe path
+        # ── Safe path highlight (recommended zone = green) ─────────────────
+        safe_z = self._cmd_to_zone(command)
+        if safe_z is not None:
+            cv2.rectangle(overlay,
+                          (zx[safe_z], TOP), (zx[safe_z+1], BOT),
+                          (0, 50, 0), -1)
 
-        # Blend overlay
-        cv2.addWeighted(overlay, 0.30, frame, 0.70, 0, frame)
+        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
 
         # ── Zone divider lines ─────────────────────────────────────────────
-        for x in zx[1:-1]:   # inner 4 lines only
-            cv2.line(frame, (x, TOP), (x, BOT), (60, 60, 60), 1)
+        for x in zx[1:-1]:
+            cv2.line(frame, (x, TOP), (x, BOT), (55, 55, 55), 1)
 
-        # ── Zone labels (small, non-intrusive) ────────────────────────────
-        zone_labels = ["FL", "ML", "C", "MR", "FR"]
-        for z, label in enumerate(zone_labels):
-            lx = (zx[z] + zx[z + 1]) // 2 - 8
-            # Colour-code label by danger
-            lc = (80, 80, 80) if ds[z] < DANGER_SLIGHT else (
-                 (0, 180, 255) if ds[z] < DANGER_FULL else (0, 80, 255))
-            cv2.putText(frame, label, (lx, TOP + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, lc, 1, cv2.LINE_AA)
+        # ── Zone direction labels ──────────────────────────────────────────
+        zone_labels = ["◄ Left", "◄ Mid L", "Forward", "Mid R ►", "Right ►"]
+        for z, lbl in enumerate(zone_labels):
+            lx = (zx[z] + zx[z+1]) // 2
+            ly = TOP + 18
+            # colour: green if recommended, red if dangerous, grey otherwise
+            if z == safe_z:
+                lc = (0, 230, 80)
+            elif ds[z] > 1.0:
+                lc = (0, 60, 220)
+            elif ds[z] > 0.25:
+                lc = (0, 160, 255)
+            else:
+                lc = (90, 90, 90)
+
+            # Danger score badge
+            score_lbl = f"{ds[z]:.1f}" if ds[z] > 0 else ""
+            (tw, _), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.putText(frame, lbl,
+                        (lx - tw//2, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, lc, 1, cv2.LINE_AA)
+            if score_lbl:
+                cv2.putText(frame, score_lbl,
+                            (lx - 8, ly + 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.32,
+                            (120, 120, 120), 1, cv2.LINE_AA)
+
+        # ── Danger bar (thin strip above banner) ──────────────────────────
+        self._draw_danger_bar(frame, ds, zx, BOT + 2, w)
 
         # ── Bottom command banner ──────────────────────────────────────────
-        banner_h = 78
+        banner_h = 80
         banner_y = h - banner_h
-
         cv2.rectangle(frame, (0, banner_y), (w, h), (10, 10, 10), -1)
-        # Thick colour accent on left
         cv2.rectangle(frame, (0, banner_y), (8, h), color, -1)
-        # Thin colour line on top of banner
         cv2.line(frame, (0, banner_y), (w, banner_y), color, 2)
 
-        # Command text
-        font_scale = 1.5
-        thick = 3
-        (tw, th), _ = cv2.getTextSize(
-            command, cv2.FONT_HERSHEY_DUPLEX, font_scale, thick)
+        # Command text centred
+        fs, thick = 1.45, 3
+        (tw, th), _ = cv2.getTextSize(command, cv2.FONT_HERSHEY_DUPLEX, fs, thick)
         tx = (w - tw) // 2
         ty = banner_y + (banner_h + th) // 2 - 2
         cv2.putText(frame, command, (tx, ty),
-                    cv2.FONT_HERSHEY_DUPLEX, font_scale, color, thick,
-                    cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_DUPLEX, fs, color, thick, cv2.LINE_AA)
 
-        # ── Directional arrow ──────────────────────────────────────────────
+        # ── Direction arrow ────────────────────────────────────────────────
         self._draw_arrow(frame, command, w, banner_y, color)
 
         # ── Nearest obstacle badge ─────────────────────────────────────────
         if distances:
-            min_d = min(distances.values())
-            self._draw_dist_badge(frame, min_d, w, banner_y)
-
-        # ── Zone danger bar (thin horizontal bar above banner) ─────────────
-        self._draw_danger_bar(frame, ds, zx, banner_y, w)
+            self._draw_dist_badge(frame, min(distances.values()), w, banner_y)
 
         return frame
 
-    def _walk_corridor(self, command: str,
-                       zx: list, w: int) -> tuple:
-        """
-        Return (x1, x2) of the recommended walk corridor to highlight green.
-        """
-        if command == CMD_CLEAR or command == CMD_FORWARD:
-            return zx[1], zx[4]           # full middle (ML to MR)
-        elif command == CMD_SLIGHT_LEFT:
-            return zx[0], zx[3]           # shift left (FL to MR)
-        elif command == CMD_LEFT:
-            return zx[0], zx[2]           # far left half
-        elif command == CMD_SLIGHT_RIGHT:
-            return zx[2], zx[5]           # shift right (C to FR)  -- fixed
-        elif command == CMD_RIGHT:
-            return zx[3], zx[5]           # far right half
-        else:
-            return zx[2], zx[3]           # just center (STOP — nowhere)
+    def _cmd_to_zone(self, command: str):
+        """Return zone index for a direction command, or None."""
+        return {v: k for k, v in ZONE_TO_CMD.items()}.get(command, None)
 
     def _draw_arrow(self, frame, command, w, banner_y, color):
-        """
-        Draw a rotated arrow above the banner.
-        Diagonal arrows for Slight Left/Right, orthogonal for others.
-        """
         cx  = w // 2
-        ay  = banner_y - 18
-        sz  = 38
-
-        angle = CMD_ANGLES.get(command, 0)
+        ay  = banner_y - 20
+        sz  = 36
 
         if command == CMD_STOP:
-            # Bold red filled square with !
             cv2.rectangle(frame, (cx-sz, ay-sz), (cx+sz, ay+sz), color, -1)
-            cv2.putText(frame, "!", (cx-10, ay + sz//2),
+            cv2.putText(frame, "!", (cx-10, ay+sz//2),
                         cv2.FONT_HERSHEY_DUPLEX, 1.5,
-                        (255, 255, 255), 3, cv2.LINE_AA)
+                        (255,255,255), 3, cv2.LINE_AA)
             return
 
         if command == CMD_VERY_SLOW:
-            # Double downward chevron (slow down hard)
-            for offset in [-sz//2, sz//4]:
-                pts = np.array([
-                    [cx,       ay + offset],
-                    [cx - sz,  ay + offset - sz//2],
-                    [cx + sz,  ay + offset - sz//2],
-                ], np.int32)
+            for off in [-sz//2, sz//4]:
+                pts = np.array([[cx, ay+off],
+                                [cx-sz, ay+off-sz//2],
+                                [cx+sz, ay+off-sz//2]], np.int32)
                 cv2.polylines(frame, [pts], False, color, 4, cv2.LINE_AA)
-            cv2.putText(frame, "!!", (cx - 16, ay + sz),
+            cv2.putText(frame, "!!", (cx-16, ay+sz),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (255, 255, 255), 2, cv2.LINE_AA)
+                        (255,255,255), 2, cv2.LINE_AA)
             return
 
         if command == CMD_SLOW:
-            # Single downward chevron
-            pts = np.array([
-                [cx,       ay],
-                [cx - sz,  ay - sz//2],
-                [cx + sz,  ay - sz//2],
-            ], np.int32)
+            pts = np.array([[cx, ay],
+                            [cx-sz, ay-sz//2],
+                            [cx+sz, ay-sz//2]], np.int32)
             cv2.polylines(frame, [pts], False, color, 4, cv2.LINE_AA)
-            cv2.putText(frame, "!", (cx - 8, ay + sz//2),
+            cv2.putText(frame, "!", (cx-8, ay+sz//2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (255, 255, 255), 2, cv2.LINE_AA)
+                        (255,255,255), 2, cv2.LINE_AA)
             return
 
-        # Build a chevron arrow and rotate it
-        # Arrow points: tip up, then rotate
+        # Rotated chevron arrow for all direction commands
+        angle = CMD_ANGLES.get(command, 0)
         arrow_pts = np.array([
-            [0,     -sz],        # tip
-            [-sz//2, sz//3],     # left base wing
-            [-sz//5, sz//3],     # left inner
-            [-sz//5, sz],        # left tail
-            [ sz//5, sz],        # right tail
-            [ sz//5, sz//3],     # right inner
-            [ sz//2, sz//3],     # right base wing
+            [0,      -sz],
+            [-sz//2,  sz//3],
+            [-sz//5,  sz//3],
+            [-sz//5,  sz],
+            [ sz//5,  sz],
+            [ sz//5,  sz//3],
+            [ sz//2,  sz//3],
         ], dtype=np.float32)
 
-        # Rotate by angle (degrees)
         if angle != 0:
             rad = np.radians(angle)
             cos_a, sin_a = np.cos(rad), np.sin(rad)
@@ -431,51 +340,35 @@ class Navigator:
         arrow_pts = (arrow_pts + [cx, ay]).astype(np.int32)
         cv2.fillPoly(frame, [arrow_pts], color)
 
-    def _draw_dist_badge(self, frame, min_dist: float,
-                          w: int, banner_y: int):
-        """Nearest obstacle distance badge — bottom right."""
+    def _draw_dist_badge(self, frame, min_dist, w, banner_y):
         label = f"Nearest  {min_dist:.1f} m"
-        if min_dist < 1.2:
-            bc = (0, 0, 230)
-        elif min_dist < 2.5:
-            bc = (0, 80, 255)
+        if min_dist < 0.4:
+            bc = (0, 0, 240)
+        elif min_dist < 0.7:
+            bc = (0, 50, 220)
+        elif min_dist < 2.0:
+            bc = (0, 120, 255)
         elif min_dist < 4.0:
             bc = (0, 190, 255)
         else:
             bc = (60, 210, 60)
-
-        (tw, th), _ = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
         rx = w - tw - 18
         ry = banner_y - 12
-        cv2.rectangle(frame, (rx-6, ry-th-4), (rx+tw+6, ry+6),
-                      (18, 18, 18), -1)
+        cv2.rectangle(frame, (rx-6, ry-th-4), (rx+tw+6, ry+6), (18,18,18), -1)
         cv2.putText(frame, label, (rx, ry),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.58, bc, 2, cv2.LINE_AA)
 
-    def _draw_danger_bar(self, frame, ds: list,
-                          zx: list, banner_y: int, w: int):
-        """
-        Draw a thin horizontal danger bar just above the command banner.
-        Each zone segment is coloured by its danger score.
-        Green=safe, yellow=caution, red=danger.
-        """
-        bar_h  = 6
-        bar_y  = banner_y - bar_h - 2
-
+    def _draw_danger_bar(self, frame, ds, zx, bar_y, w):
+        bar_h = 6
         for z in range(5):
-            x1, x2 = zx[z], zx[z + 1]
+            x1, x2 = zx[z], zx[z+1]
             d = ds[z]
-            if d < DANGER_SLIGHT:
-                seg_color = (0, 180, 0)       # green
-            elif d < DANGER_FULL:
-                seg_color = (0, 200, 255)     # yellow/amber
+            if d < 0.25:
+                c = (0, 180, 0)
+            elif d < 1.0:
+                c = (0, 200, 255)
             else:
-                seg_color = (0, 0, 220)       # red
-
-            cv2.rectangle(frame, (x1, bar_y), (x2, bar_y + bar_h),
-                          seg_color, -1)
-
-        # Bar border
-        cv2.rectangle(frame, (0, bar_y), (w, bar_y + bar_h),
-                      (40, 40, 40), 1)
+                c = (0, 0, 220)
+            cv2.rectangle(frame, (x1, bar_y), (x2, bar_y+bar_h), c, -1)
+        cv2.rectangle(frame, (0, bar_y), (w, bar_y+bar_h), (40,40,40), 1)
