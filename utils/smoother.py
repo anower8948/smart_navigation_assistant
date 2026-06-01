@@ -19,13 +19,18 @@ from collections import deque
 import time
 
 from utils.navigator import (
-    CMD_STOP, CMD_LEFT, CMD_SLIGHT_LEFT,
-    CMD_RIGHT, CMD_SLIGHT_RIGHT, CMD_FORWARD, CMD_CLEAR
+    CMD_STOP, CMD_VERY_SLOW, CMD_SLOW,
+    CMD_LEFT, CMD_SLIGHT_LEFT,
+    CMD_RIGHT, CMD_SLIGHT_RIGHT,
+    CMD_FORWARD, CMD_CLEAR
 )
 
 # Per-command confirm window sizes
+# Speed commands confirm quickly — direction commands a touch slower
 CONFIRM_WINDOWS = {
-    CMD_STOP:          1,
+    CMD_STOP:          1,   # instant — safety
+    CMD_VERY_SLOW:     1,   # instant — safety
+    CMD_SLOW:          2,   # fast
     CMD_LEFT:          2,
     CMD_SLIGHT_LEFT:   2,
     CMD_RIGHT:         2,
@@ -35,7 +40,7 @@ CONFIRM_WINDOWS = {
 }
 
 DEFAULT_WINDOW  = 2
-INSTANT_CMDS    = {CMD_STOP}
+INSTANT_CMDS    = {CMD_STOP, CMD_VERY_SLOW}
 
 # Voice cooldowns (seconds) by proximity
 COOLDOWN_CRITICAL = 0.8
@@ -99,7 +104,9 @@ class SpeedAwareVoice:
 
     # What to actually say for each command
     SPEECH_TEXT = {
-        CMD_STOP:          "WARNING. Stop immediately.",
+        CMD_STOP:          "Stop! Obstacle very close.",
+        CMD_VERY_SLOW:     "Walk very slowly. Obstacle extremely close.",
+        CMD_SLOW:          "Walk slowly. Obstacle nearby.",
         CMD_LEFT:          "Move Left.",
         CMD_SLIGHT_LEFT:   "Bear Left.",
         CMD_RIGHT:         "Move Right.",

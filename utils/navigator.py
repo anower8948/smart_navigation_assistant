@@ -152,64 +152,71 @@ class Navigator:
         # Danger scores per zone
         ds = [self._danger(zone_dists[z]) for z in range(5)]
 
-        # Closest distance in center zone
+        # Closest distance across ALL zones (global)
+        all_dists_flat = [d for zd in zone_dists for d in zd]
+        global_min = min(all_dists_flat, default=99.0)
+
+        # Closest distance in CENTER zone only
         cc_min = min(zone_dists[Z_C], default=99.0)
 
-        # ── 1. STOP ────────────────────────────────────────────────────────
-        if cc_min < STOP_DIST:
+        # ══════════════════════════════════════════════════════════════
+        #  SPEED / SAFETY TIER  (based on closest CENTER obstacle)
+        # ══════════════════════════════════════════════════════════════
+
+        # ── Tier 1: STOP — < 0.40m anywhere ──────────────────────────
+        if global_min < STOP_DIST:           # < 0.40m
             return self._set(CMD_STOP)
 
-        # ── 2. Center danger → pick best direction ─────────────────────────
-        if ds[Z_C] > 0:
+        # ── Tier 2: Walk Very Slowly — center 0.40–0.69m ─────────────
+        if cc_min <= VERY_SLOW_DIST:         # 0.40–0.69m
+            return self._set(CMD_VERY_SLOW)
 
-            # Left half danger = FAR_LEFT + MID_LEFT (weighted by proximity)
+        # ── Tier 3: Walk Slowly — center 0.70–1.99m ──────────────────
+        if cc_min <= SLOW_DIST:              # 0.70–1.99m
+            return self._set(CMD_SLOW)
+
+        # ══════════════════════════════════════════════════════════════
+        #  DIRECTION LOGIC  (center obstacle >= 2.0m → navigate freely)
+        # ══════════════════════════════════════════════════════════════
+
+        # ── Tier 4: Center blocked ≥ 2m → steer to open side ─────────
+        if ds[Z_C] > 0:
+            # Weighted danger of left half vs right half
             left_danger  = ds[Z_FL] * 0.5 + ds[Z_ML] * 1.0
             right_danger = ds[Z_MR] * 1.0 + ds[Z_FR] * 0.5
 
-            # Decide FULL vs SLIGHT based on center danger level
+            # Full turn vs slight nudge based on danger intensity
             full_turn   = (ds[Z_C] >= DANGER_FULL) or (cc_min < FULL_TURN_DIST)
             slight_turn = (ds[Z_C] >= DANGER_SLIGHT) and not full_turn
 
-            go_left  = left_danger  <= right_danger
-            go_right = right_danger <  left_danger
-
-            if go_left:
-                # Check if mid-left is clear enough for slight turn
+            if left_danger <= right_danger:
                 if slight_turn and ds[Z_ML] < DANGER_SLIGHT:
                     return self._set(CMD_SLIGHT_LEFT)
-                else:
-                    return self._set(CMD_LEFT)
+                return self._set(CMD_LEFT)
             else:
                 if slight_turn and ds[Z_MR] < DANGER_SLIGHT:
                     return self._set(CMD_SLIGHT_RIGHT)
-                else:
-                    return self._set(CMD_RIGHT)
+                return self._set(CMD_RIGHT)
 
-        # ── 3. No center obstacle — check sides ────────────────────────────
-        left_side_danger  = ds[Z_FL] + ds[Z_ML]
-        right_side_danger = ds[Z_MR] + ds[Z_FR]
-
-        # Mid-left blocked but not center → gentle right nudge
+        # ── Tier 5: Side-only obstacles (center clear) ────────────────
+        # Mid-left busy → nudge right
         if ds[Z_ML] >= DANGER_SLIGHT and ds[Z_MR] < DANGER_SLIGHT:
             return self._set(CMD_SLIGHT_RIGHT)
-
-        # Mid-right blocked but not center → gentle left nudge
+        # Mid-right busy → nudge left
         if ds[Z_MR] >= DANGER_SLIGHT and ds[Z_ML] < DANGER_SLIGHT:
             return self._set(CMD_SLIGHT_LEFT)
-
-        # Far-left blocked only → slight right nudge
+        # Far-left busy → nudge right
         if ds[Z_FL] >= DANGER_SLIGHT and ds[Z_FR] < DANGER_SLIGHT:
             return self._set(CMD_SLIGHT_RIGHT)
-
-        # Far-right blocked only → slight left nudge
+        # Far-right busy → nudge left
         if ds[Z_FR] >= DANGER_SLIGHT and ds[Z_FL] < DANGER_SLIGHT:
             return self._set(CMD_SLIGHT_LEFT)
 
-        # ── 4. Any detections exist but nothing critical ───────────────────
+        # ── Tier 6: Obstacles exist but all far ───────────────────────
         if any(zone_dists):
             return self._set(CMD_FORWARD)
 
-        # ── 5. Truly clear ─────────────────────────────────────────────────
+        # ── Tier 7: Truly clear ───────────────────────────────────────
         return self._set(CMD_CLEAR)
 
     def _set(self, cmd: str) -> str:
@@ -351,11 +358,38 @@ class Navigator:
         angle = CMD_ANGLES.get(command, 0)
 
         if command == CMD_STOP:
-            # Red octagon stop
+            # Bold red filled square with !
             cv2.rectangle(frame, (cx-sz, ay-sz), (cx+sz, ay+sz), color, -1)
             cv2.putText(frame, "!", (cx-10, ay + sz//2),
                         cv2.FONT_HERSHEY_DUPLEX, 1.5,
                         (255, 255, 255), 3, cv2.LINE_AA)
+            return
+
+        if command == CMD_VERY_SLOW:
+            # Double downward chevron (slow down hard)
+            for offset in [-sz//2, sz//4]:
+                pts = np.array([
+                    [cx,       ay + offset],
+                    [cx - sz,  ay + offset - sz//2],
+                    [cx + sz,  ay + offset - sz//2],
+                ], np.int32)
+                cv2.polylines(frame, [pts], False, color, 4, cv2.LINE_AA)
+            cv2.putText(frame, "!!", (cx - 16, ay + sz),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (255, 255, 255), 2, cv2.LINE_AA)
+            return
+
+        if command == CMD_SLOW:
+            # Single downward chevron
+            pts = np.array([
+                [cx,       ay],
+                [cx - sz,  ay - sz//2],
+                [cx + sz,  ay - sz//2],
+            ], np.int32)
+            cv2.polylines(frame, [pts], False, color, 4, cv2.LINE_AA)
+            cv2.putText(frame, "!", (cx - 8, ay + sz//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (255, 255, 255), 2, cv2.LINE_AA)
             return
 
         # Build a chevron arrow and rotate it
