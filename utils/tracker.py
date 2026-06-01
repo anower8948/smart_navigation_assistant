@@ -238,22 +238,54 @@ class ObjectTracker:
                 thickness = max(1, int(3 * i / len(hist)))
                 cv2.line(frame, hist[i-1], hist[i], trail_color, thickness)
 
-            # Track ID label
+            # ── Track ID chip ──────────────────────────────────────────
             cx, cy = track.center
-            label = f"#{track.id}"
-            cv2.putText(frame, label,
-                        (cx + 6, cy - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, trail_color, 1)
 
-            # Approach indicator arrow
+            # Approach badge text: show only when notably approaching
+            status = track.approach_status
+            if status == "APPROACHING_FAST":
+                badge = f"#{track.id}  FAST"
+            elif status == "APPROACHING":
+                badge = f"#{track.id}  near"
+            else:
+                badge = f"#{track.id}"
+
+            font       = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.38
+            font_thick = 1
+            pad_x, pad_y = 5, 3
+
+            (tw, th), _ = cv2.getTextSize(badge, font, font_scale, font_thick)
+
+            bx = cx + 8
+            by = cy - 8
+            # clamp inside frame
+            bx = max(bx, 2)
+            by = max(by, th + pad_y + 2)
+
+            # Dark semi-transparent chip
+            cv2.rectangle(frame,
+                          (bx, by - th - pad_y),
+                          (bx + tw + pad_x * 2, by + pad_y),
+                          (20, 20, 20), -1)
+            # Coloured left border
+            cv2.rectangle(frame,
+                          (bx, by - th - pad_y),
+                          (bx + 2, by + pad_y),
+                          trail_color, -1)
+            cv2.putText(frame, badge,
+                        (bx + pad_x, by),
+                        font, font_scale, (210, 210, 210), font_thick, cv2.LINE_AA)
+
+            # ── Approach velocity arrow ────────────────────────────────
             if track.is_approaching:
                 vx, vy = track.velocity
                 mag = np.hypot(vx, vy)
                 if mag > 0:
-                    scale = 30.0 / mag
+                    scale = 28.0 / mag
                     ex = int(cx + vx * scale)
                     ey = int(cy + vy * scale)
                     cv2.arrowedLine(frame, (cx, cy), (ex, ey),
-                                    trail_color, 2, tipLength=0.4)
+                                    trail_color, 2, tipLength=0.35)
 
         return frame

@@ -156,17 +156,12 @@ class ObjectDetector:
     def draw_detections(self, frame: np.ndarray, detections: list[dict],
                         distances: dict = None) -> np.ndarray:
         """
-        Draw bounding boxes, labels, confidence and distance on frame.
+        Draw bounding boxes and clean label badges on frame.
 
-        Parameters
-        ----------
-        frame      : BGR image (numpy array)
-        detections : list from detect()
-        distances  : dict mapping detection index -> estimated distance (m)
-
-        Returns
-        -------
-        Annotated BGR frame
+        Label design:
+          ┌─────────────────────────┐
+          │  Person  87%  · 2.3 m  │  ← single-line pill, dark bg + colour accent
+          └─────────────────────────┘
         """
         annotated = frame.copy()
 
@@ -177,40 +172,56 @@ class ObjectDetector:
             color = CLASS_COLORS.get(name, DEFAULT_COLOR)
             dist  = distances.get(idx, None) if distances else None
 
-            # Bounding box
+            # ── Bounding box (thin, clean) ─────────────────────────────
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
-            # Label line 1: class + confidence
-            label1 = f"{name}  {conf * 100:.0f}%"
-            # Label line 2: distance
-            label2 = f"Dist: {dist:.1f}m" if dist is not None else ""
+            # Corner accent marks (small L-shapes at corners)
+            corner = 10
+            thick  = 3
+            for cx_, cy_, dx, dy in [
+                (x1, y1,  1,  1), (x2, y1, -1,  1),
+                (x1, y2,  1, -1), (x2, y2, -1, -1),
+            ]:
+                cv2.line(annotated, (cx_, cy_), (cx_ + dx*corner, cy_), color, thick)
+                cv2.line(annotated, (cx_, cy_), (cx_, cy_ + dy*corner), color, thick)
 
-            label_y = max(y1 - 10, 20)
+            # ── Single-line label pill ─────────────────────────────────
+            if dist is not None:
+                label = f"{name}  {conf*100:.0f}%   {dist:.1f} m"
+            else:
+                label = f"{name}  {conf*100:.0f}%"
 
-            # Background pill for readability
-            (tw1, th1), _ = cv2.getTextSize(label1, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            font       = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.48
+            font_thick = 1
+            pad_x, pad_y = 7, 5
+
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, font_thick)
+
+            # Position: just above top-left corner of bbox
+            lx = x1
+            ly = max(y1 - pad_y - 2, th + pad_y + 2)
+
+            # Dark pill background
             cv2.rectangle(annotated,
-                          (x1, label_y - th1 - 4),
-                          (x1 + tw1 + 6, label_y + 4),
+                          (lx, ly - th - pad_y),
+                          (lx + tw + pad_x * 2, ly + pad_y - 2),
+                          (18, 18, 18), -1)
+
+            # Left colour accent stripe
+            cv2.rectangle(annotated,
+                          (lx, ly - th - pad_y),
+                          (lx + 3, ly + pad_y - 2),
                           color, -1)
-            cv2.putText(annotated, label1,
-                        (x1 + 3, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
 
-            if label2:
-                ly2 = label_y + th1 + 8
-                (tw2, th2), _ = cv2.getTextSize(label2, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
-                cv2.rectangle(annotated,
-                              (x1, ly2 - th2 - 2),
-                              (x1 + tw2 + 6, ly2 + 4),
-                              (30, 30, 30), -1)
-                cv2.putText(annotated, label2,
-                            (x1 + 3, ly2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1)
+            # Label text (white, crisp)
+            cv2.putText(annotated, label,
+                        (lx + pad_x, ly),
+                        font, font_scale, (230, 230, 230), font_thick, cv2.LINE_AA)
 
-            # Center dot
+            # ── Small centre dot ──────────────────────────────────────
             cv2.circle(annotated,
                        (det["center_x"], det["center_y"]),
-                       5, color, -1)
+                       4, color, -1)
 
         return annotated
