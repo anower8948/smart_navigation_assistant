@@ -43,7 +43,7 @@ import numpy as np
 # ── Local module imports ──────────────────────────────────────────────────────
 from utils.detector           import ObjectDetector
 from utils.distance_estimator import DistanceEstimator
-from utils.navigator          import Navigator, CMD_STOP, CMD_CLEAR
+from utils.navigator          import Navigator, CMD_STOP, CMD_CLEAR, CMD_LEFT, CMD_RIGHT
 from utils.voice_assistant    import VoiceAssistant
 from utils.tracker            import ObjectTracker
 from utils.heatmap            import DangerHeatmap, MiniRadar
@@ -238,9 +238,12 @@ def run(args):
 
             # ── Voice guidance ────────────────────────────────────────
             min_dist = min(distances.values(), default=99.0)
+            # Speak on every command change OR if distance dropped sharply
             if stable_cmd != prev_stable:
                 speed_voice.speak(stable_cmd, min_dist)
                 prev_stable = stable_cmd
+            elif stable_cmd in (CMD_STOP, CMD_LEFT, CMD_RIGHT) and min_dist < 1.5:
+                speed_voice.speak(stable_cmd, min_dist)  # repeat urgently
 
             # ── Special alerts ────────────────────────────────────────
             alerts = alert_eng.analyse(detections, distances,
