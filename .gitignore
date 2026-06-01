@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+models/*.pt
+output/*.mp4
+videos/*.mp4
+.DS_Store
+*.egg-info/
