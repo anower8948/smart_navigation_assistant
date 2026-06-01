@@ -62,10 +62,20 @@ ZONE_NAMES  = ["FAR_LEFT", "MID_LEFT", "CENTER", "MID_RIGHT", "FAR_RIGHT"]
 Z_FL, Z_ML, Z_C, Z_MR, Z_FR = 0, 1, 2, 3, 4
 
 # ── Distance thresholds (metres) ──────────────────────────────────────────
-STOP_DIST       = 1.2    # STOP when center obstacle closer than this
-SLIGHT_DIST     = 3.0    # Slight turn when center obstacle within this
-FULL_TURN_DIST  = 5.0    # Full turn when center obstacle within this
-MAX_NAV_DIST    = 6.0    # Ignore obstacles beyond this
+#  Speed tiers (user-defined rules):
+#    < 0.40m          →  STOP
+#    0.40 – 0.69m     →  Walk Very Slowly
+#    0.70 – 1.99m     →  Walk Slowly
+#    >= 2.0m          →  direction logic (free to walk)
+STOP_DIST      = 0.40   # hard stop threshold
+VERY_SLOW_DIST = 0.69   # walk very slowly upper bound
+SLOW_DIST      = 1.99   # walk slowly upper bound
+FREE_WALK_DIST = 2.0    # >= this → full direction navigation
+
+#  Direction / zone thresholds
+SLIGHT_DIST    = 3.0    # mild centre blockage → slight turn
+FULL_TURN_DIST = 5.0    # strong centre blockage → full turn
+MAX_NAV_DIST   = 6.0    # ignore obstacles beyond this distance
 
 # ── Danger score thresholds ────────────────────────────────────────────────
 # danger_score = sum(1/dist) for all obstacles in zone
